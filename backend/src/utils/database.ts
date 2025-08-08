@@ -1,61 +1,44 @@
-// backend/src/utils/database.ts
 import mongoose from "mongoose";
 import { logger } from "./logger";
-import { config } from "./config";
 
-class DatabaseConnection {
-  private static instance: DatabaseConnection;
-  private isConnected: boolean = false;
+export class Database {
+  private static instance: Database;
+  private isConnected = false;
 
   private constructor() {}
 
-  public static getInstance(): DatabaseConnection {
-    if (!DatabaseConnection.instance) {
-      DatabaseConnection.instance = new DatabaseConnection();
+  public static getInstance(): Database {
+    if (!Database.instance) {
+      Database.instance = new Database();
     }
-    return DatabaseConnection.instance;
+    return Database.instance;
   }
 
-  public async connect(): Promise<void> {
+  public async connect(uri: string): Promise<void> {
     if (this.isConnected) {
       logger.info("Database already connected");
       return;
     }
 
     try {
-      const options: mongoose.ConnectOptions = {
-        maxPoolSize: 10, // Maintain up to 10 socket connections
-        serverSelectionTimeoutMS: 5000, // Keep trying to send operations for 5 seconds
-        socketTimeoutMS: 45000, // Close sockets after 45 seconds of inactivity
-        bufferMaxEntries: 0, // Disable mongoose buffering
-        bufferCommands: false, // Disable mongoose buffering
-      };
+      await mongoose.connect(uri, {
+        maxPoolSize: 10,
+        serverSelectionTimeoutMS: 5000,
+        socketTimeoutMS: 45000,
+      });
 
-      await mongoose.connect(config.mongodb.uri, options);
       this.isConnected = true;
-
-      logger.info("Successfully connected to MongoDB", {
-        host: config.mongodb.uri.split("@")[1] || "localhost",
-        database: config.mongodb.uri.split("/").pop(),
-      });
-
-      // Handle connection events
-      mongoose.connection.on("error", (err) => {
-        logger.error("MongoDB connection error:", err);
-        this.isConnected = false;
-      });
+      logger.info("Connected to MongoDB successfully");
 
       mongoose.connection.on("disconnected", () => {
-        logger.warn("MongoDB disconnected");
         this.isConnected = false;
+        logger.warn("MongoDB disconnected");
       });
 
-      mongoose.connection.on("reconnected", () => {
-        logger.info("MongoDB reconnected");
-        this.isConnected = true;
+      mongoose.connection.on("error", (error) => {
+        logger.error("MongoDB connection error:", error);
       });
     } catch (error) {
-      this.isConnected = false;
       logger.error("Failed to connect to MongoDB:", error);
       throw error;
     }
@@ -67,69 +50,26 @@ class DatabaseConnection {
     }
 
     try {
-      await mongoose.connection.close();
+      await mongoose.disconnect();
       this.isConnected = false;
-      logger.info("MongoDB connection closed");
+      logger.info("Disconnected from MongoDB");
     } catch (error) {
-      logger.error("Error closing MongoDB connection:", error);
+      logger.error("Error disconnecting from MongoDB:", error);
       throw error;
     }
   }
 
-  public isConnectionReady(): boolean {
-    return this.isConnected && mongoose.connection.readyState === 1;
+  public getConnectionStatus(): boolean {
+    return this.isConnected;
   }
 
-  public async healthCheck(): Promise<{ status: string; details: any }> {
+  public async healthCheck(): Promise<boolean> {
     try {
-      if (!this.isConnected) {
-        return {
-          status: "disconnected",
-          details: { readyState: mongoose.connection.readyState },
-        };
-      }
-
-      // Perform a simple operation to test connectivity
-      await mongoose.connection.db.admin().ping();
-
-      return {
-        status: "healthy",
-        details: {
-          readyState: mongoose.connection.readyState,
-          host: mongoose.connection.host,
-          port: mongoose.connection.port,
-          name: mongoose.connection.name,
-        },
-      };
+      const state = mongoose.connection.readyState;
+      return state === 1; // 1 means connected
     } catch (error) {
-      return {
-        status: "error",
-        details: { error: (error as Error).message },
-      };
+      logger.error("Database health check failed:", error);
+      return false;
     }
   }
 }
-
-// Export singleton instance
-export const database = DatabaseConnection.getInstance();
-
-// Model imports and initialization
-export const initializeModels = async (): Promise<void> => {
-  try {
-    // Import models to register them with mongoose
-    await import("../models/User");
-    await import("../models/Attendance");
-    await import("../models/Session");
-
-    logger.info("Database models initialized successfully");
-  } catch (error) {
-    logger.error("Failed to initialize database models:", error);
-    throw error;
-  }
-};
-
-// Graceful shutdown handler
-export const gracefulShutdown = async (): Promise<void> => {
-  logger.info("Shutting down database connection...");
-  await database.disconnect();
-};

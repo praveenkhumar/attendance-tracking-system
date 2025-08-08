@@ -1,55 +1,67 @@
-// backend/src/models/User.ts
-import { Schema, model, Document } from "mongoose";
+import { Schema, model, Document, Types } from "mongoose";
+import bcrypt from "bcryptjs";
 
 export interface IUser extends Document {
-  _id: string;
+  _id: Types.ObjectId;
   name: string;
   email: string;
-  faceDescriptor: number[];
+  password?: string;
+  role: "admin" | "user";
+  faceDescriptor?: number[];
   isActive: boolean;
+  profileImage?: string;
   createdAt: Date;
   updatedAt: Date;
+  comparePassword(candidatePassword: string): Promise<boolean>;
 }
 
-const UserSchema = new Schema<IUser>(
+const userSchema = new Schema<IUser>(
   {
     name: {
       type: String,
-      required: [true, "Name is required"],
+      required: true,
       trim: true,
-      minlength: [2, "Name must be at least 2 characters long"],
-      maxlength: [50, "Name cannot exceed 50 characters"],
+      maxlength: 100,
     },
     email: {
       type: String,
-      required: [true, "Email is required"],
+      required: true,
       unique: true,
-      trim: true,
       lowercase: true,
+      trim: true,
       match: [
         /^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/,
-        "Please provide a valid email",
+        "Please enter a valid email",
       ],
+    },
+    password: {
+      type: String,
+      minlength: 6,
+      select: false, // Don't include password in queries by default
+    },
+    role: {
+      type: String,
+      enum: ["admin", "user"],
+      default: "user",
     },
     faceDescriptor: {
       type: [Number],
-      required: [true, "Face descriptor is required"],
-      validate: {
-        validator: function (v: number[]) {
-          return v && v.length === 128; // face-api.js returns 128-dimensional vectors
-        },
-        message: "Face descriptor must be a 128-dimensional array",
-      },
+      default: undefined,
     },
     isActive: {
       type: Boolean,
       default: true,
+    },
+    profileImage: {
+      type: String,
+      default: undefined,
     },
   },
   {
     timestamps: true,
     toJSON: {
       transform: function (doc, ret) {
+        delete ret.password;
         delete ret.__v;
         return ret;
       },
@@ -57,16 +69,44 @@ const UserSchema = new Schema<IUser>(
   }
 );
 
-// Indexes for better query performance
-UserSchema.index({ email: 1 });
-UserSchema.index({ isActive: 1 });
-UserSchema.index({ createdAt: -1 });
+// Index for faster queries
+userSchema.index({ email: 1 });
+userSchema.index({ isActive: 1 });
+userSchema.index({ createdAt: -1 });
 
-// Instance methods
-UserSchema.methods.toSafeObject = function () {
-  const userObject = this.toObject();
-  delete userObject.faceDescriptor; // Don't expose face data in API responses
-  return userObject;
+// Hash password before saving
+userSchema.pre("save", async function (next) {
+  if (!this.isModified("password") || !this.password) {
+    return next();
+  }
+
+  try {
+    const saltRounds = 12;
+    this.password = await bcrypt.hash(this.password, saltRounds);
+    next();
+  } catch (error) {
+    next(error as Error);
+  }
+});
+
+// Instance method to compare password
+userSchema.methods.comparePassword = async function (
+  candidatePassword: string
+): Promise<boolean> {
+  if (!this.password) {
+    return false;
+  }
+  return await bcrypt.compare(candidatePassword, this.password);
 };
 
-export const User = model<IUser>("User", UserSchema);
+// Static method to find by email
+userSchema.statics.findByEmail = function (email: string) {
+  return this.findOne({ email: email.toLowerCase() });
+};
+
+// Static method to find active users
+userSchema.statics.findActive = function () {
+  return this.find({ isActive: true });
+};
+
+export const User = model<IUser>("User", userSchema);

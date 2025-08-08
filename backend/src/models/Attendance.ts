@@ -1,97 +1,71 @@
-// backend/src/models/Attendance.ts
 import { Schema, model, Document, Types } from "mongoose";
 
-export enum AttendanceType {
-  ENTRY = "ENTRY",
-  EXIT = "EXIT",
-}
-
 export interface IAttendance extends Document {
-  _id: string;
+  _id: Types.ObjectId;
   userId: Types.ObjectId;
-  type: AttendanceType;
+  type: "ENTRY" | "EXIT";
   timestamp: Date;
   imageUrl?: string;
   confidence: number;
   ipAddress?: string;
   userAgent?: string;
   location?: {
-    latitude: number;
-    longitude: number;
+    latitude?: number;
+    longitude?: number;
   };
+  createdAt: Date;
+  updatedAt: Date;
 }
 
-const AttendanceSchema = new Schema<IAttendance>(
+const attendanceSchema = new Schema<IAttendance>(
   {
     userId: {
       type: Schema.Types.ObjectId,
       ref: "User",
-      required: [true, "User ID is required"],
+      required: true,
       index: true,
     },
     type: {
       type: String,
-      enum: Object.values(AttendanceType),
-      required: [true, "Attendance type is required"],
+      enum: ["ENTRY", "EXIT"],
+      required: true,
     },
     timestamp: {
       type: Date,
       default: Date.now,
       required: true,
-      index: true,
     },
     imageUrl: {
       type: String,
-      trim: true,
-      validate: {
-        validator: function (v: string) {
-          if (!v) return true; // Optional field
-          return /^https?:\/\/.+\.(jpg|jpeg|png|webp)$/i.test(v);
-        },
-        message: "Invalid image URL format",
-      },
+      default: undefined,
     },
     confidence: {
       type: Number,
-      required: [true, "Confidence score is required"],
-      min: [0, "Confidence must be between 0 and 1"],
-      max: [1, "Confidence must be between 0 and 1"],
+      required: true,
+      min: 0,
+      max: 1,
     },
     ipAddress: {
       type: String,
-      trim: true,
-      validate: {
-        validator: function (v: string) {
-          if (!v) return true; // Optional field
-          // Basic IP validation (IPv4 and IPv6)
-          const ipv4Regex =
-            /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
-          const ipv6Regex = /^(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$/;
-          return ipv4Regex.test(v) || ipv6Regex.test(v);
-        },
-        message: "Invalid IP address format",
-      },
+      default: undefined,
     },
     userAgent: {
       type: String,
-      trim: true,
-      maxlength: [500, "User agent cannot exceed 500 characters"],
+      default: undefined,
     },
     location: {
       latitude: {
         type: Number,
-        min: [-90, "Latitude must be between -90 and 90"],
-        max: [90, "Latitude must be between -90 and 90"],
+        default: undefined,
       },
       longitude: {
         type: Number,
-        min: [-180, "Longitude must be between -180 and 180"],
-        max: [180, "Longitude must be between -180 and 180"],
+        default: undefined,
       },
     },
   },
   {
-    timestamps: false, // We're using custom timestamp field
+    timestamps: true,
     toJSON: {
       transform: function (doc, ret) {
         delete ret.__v;
@@ -101,76 +75,86 @@ const AttendanceSchema = new Schema<IAttendance>(
   }
 );
 
-// Compound indexes for efficient queries
-AttendanceSchema.index({ userId: 1, timestamp: -1 });
-AttendanceSchema.index({ timestamp: -1 });
-AttendanceSchema.index({ userId: 1, type: 1, timestamp: -1 });
+// Compound indexes for better query performance
+attendanceSchema.index({ userId: 1, timestamp: -1 });
+attendanceSchema.index({ timestamp: -1 });
+attendanceSchema.index({ type: 1, timestamp: -1 });
+attendanceSchema.index({ userId: 1, type: 1, timestamp: -1 });
 
-// Static methods
-AttendanceSchema.statics.getLastAttendance = function (userId: string) {
+// Static method to get last attendance for a user
+attendanceSchema.statics.getLastAttendanceForUser = function (
+  userId: Types.ObjectId
+) {
   return this.findOne({ userId }).sort({ timestamp: -1 });
 };
 
-AttendanceSchema.statics.getDailyAttendance = function (
-  userId: string,
-  date?: Date
+// Static method to get attendance for a date range
+attendanceSchema.statics.getAttendanceByDateRange = function (
+  startDate: Date,
+  endDate: Date,
+  userId?: Types.ObjectId
 ) {
-  const targetDate = date || new Date();
-  const startOfDay = new Date(targetDate);
+  const query: any = {
+    timestamp: {
+      $gte: startDate,
+      $lte: endDate,
+    },
+  };
+
+  if (userId) {
+    query.userId = userId;
+  }
+
+  return this.find(query)
+    .populate("userId", "name email")
+    .sort({ timestamp: -1 });
+};
+
+// Static method to get today's attendance
+attendanceSchema.statics.getTodayAttendance = function (
+  userId?: Types.ObjectId
+) {
+  const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
 
-  const endOfDay = new Date(targetDate);
+  const endOfDay = new Date();
   endOfDay.setHours(23, 59, 59, 999);
 
-  return this.find({
-    userId,
-    timestamp: { $gte: startOfDay, $lte: endOfDay },
-  }).sort({ timestamp: 1 });
+  return this.getAttendanceByDateRange(startOfDay, endOfDay, userId);
 };
 
-AttendanceSchema.statics.getAttendanceStats = function (
-  startDate: Date,
-  endDate: Date
-) {
-  return this.aggregate([
-    {
-      $match: {
-        timestamp: { $gte: startDate, $lte: endDate },
-      },
-    },
-    {
-      $lookup: {
-        from: "users",
-        localField: "userId",
-        foreignField: "_id",
-        as: "user",
-      },
-    },
-    {
-      $unwind: "$user",
-    },
-    {
-      $group: {
-        _id: "$userId",
-        userName: { $first: "$user.name" },
-        totalEntries: {
-          $sum: { $cond: [{ $eq: ["$type", "ENTRY"] }, 1, 0] },
-        },
-        totalExits: {
-          $sum: { $cond: [{ $eq: ["$type", "EXIT"] }, 1, 0] },
-        },
-        firstEntry: {
-          $min: { $cond: [{ $eq: ["$type", "ENTRY"] }, "$timestamp", null] },
-        },
-        lastExit: {
-          $max: { $cond: [{ $eq: ["$type", "EXIT"] }, "$timestamp", null] },
-        },
-      },
-    },
-    {
-      $sort: { userName: 1 },
-    },
-  ]);
+// Static method to check if user has entry without exit today
+attendanceSchema.statics.hasActiveEntry = async function (
+  userId: Types.ObjectId
+): Promise<boolean> {
+  const todayAttendance = await this.getTodayAttendance(userId);
+
+  if (todayAttendance.length === 0) {
+    return false;
+  }
+
+  // Check if the last entry today is an ENTRY without a matching EXIT
+  const lastEntry = todayAttendance.find(
+    (record: IAttendance) => record.type === "ENTRY"
+  );
+  if (!lastEntry) {
+    return false;
+  }
+
+  const lastExit = todayAttendance.find(
+    (record: IAttendance) =>
+      record.type === "EXIT" && record.timestamp > lastEntry.timestamp
+  );
+
+  return !lastExit;
 };
 
-export const Attendance = model<IAttendance>("Attendance", AttendanceSchema);
+// Virtual for populating user data
+attendanceSchema.virtual("user", {
+  ref: "User",
+  localField: "userId",
+  foreignField: "_id",
+  justOne: true,
+});
+
+export const Attendance = model<IAttendance>("Attendance", attendanceSchema);

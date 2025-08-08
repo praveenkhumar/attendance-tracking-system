@@ -1,73 +1,48 @@
-// backend/src/models/Session.ts
 import { Schema, model, Document, Types } from "mongoose";
 
 export interface ISession extends Document {
-  _id: string;
+  _id: Types.ObjectId;
   userId: Types.ObjectId;
-  token: string;
-  role: string;
+  sessionId: string;
+  isActive: boolean;
   expiresAt: Date;
   ipAddress?: string;
   userAgent?: string;
-  isActive: boolean;
-  lastAccessedAt: Date;
   createdAt: Date;
   updatedAt: Date;
 }
 
-const SessionSchema = new Schema<ISession>(
+const sessionSchema = new Schema<ISession>(
   {
     userId: {
       type: Schema.Types.ObjectId,
       ref: "User",
-      required: [true, "User ID is required"],
+      required: true,
       index: true,
     },
-    token: {
+    sessionId: {
       type: String,
-      required: [true, "Token is required"],
+      required: true,
       unique: true,
       index: true,
-    },
-    role: {
-      type: String,
-      enum: ["admin", "user"],
-      default: "admin",
-      required: true,
-    },
-    expiresAt: {
-      type: Date,
-      required: [true, "Expiration date is required"],
-      index: { expireAfterSeconds: 0 }, // MongoDB TTL index for automatic cleanup
-    },
-    ipAddress: {
-      type: String,
-      trim: true,
-      validate: {
-        validator: function (v: string) {
-          if (!v) return true; // Optional field
-          const ipv4Regex =
-            /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
-          const ipv6Regex = /^(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$/;
-          return ipv4Regex.test(v) || ipv6Regex.test(v);
-        },
-        message: "Invalid IP address format",
-      },
-    },
-    userAgent: {
-      type: String,
-      trim: true,
-      maxlength: [500, "User agent cannot exceed 500 characters"],
     },
     isActive: {
       type: Boolean,
       default: true,
       index: true,
     },
-    lastAccessedAt: {
+    expiresAt: {
       type: Date,
-      default: Date.now,
       required: true,
+      index: { expireAfterSeconds: 0 }, // TTL index
+    },
+    ipAddress: {
+      type: String,
+      default: undefined,
+    },
+    userAgent: {
+      type: String,
+      default: undefined,
     },
   },
   {
@@ -75,53 +50,42 @@ const SessionSchema = new Schema<ISession>(
     toJSON: {
       transform: function (doc, ret) {
         delete ret.__v;
-        delete ret.token; // Never expose tokens in API responses
         return ret;
       },
     },
   }
 );
 
-// Compound indexes for efficient queries
-SessionSchema.index({ token: 1, isActive: 1 });
-SessionSchema.index({ userId: 1, isActive: 1 });
-SessionSchema.index({ expiresAt: 1, isActive: 1 });
+// Index for cleanup of expired sessions
+sessionSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
-// Instance methods
-SessionSchema.methods.isExpired = function (): boolean {
-  return new Date() > this.expiresAt;
-};
-
-SessionSchema.methods.updateLastAccessed = function () {
-  this.lastAccessedAt = new Date();
-  return this.save();
-};
-
-SessionSchema.methods.deactivate = function () {
-  this.isActive = false;
-  return this.save();
-};
-
-// Static methods
-SessionSchema.statics.cleanupExpiredSessions = function () {
-  return this.deleteMany({
-    $or: [{ expiresAt: { $lt: new Date() } }, { isActive: false }],
-  });
-};
-
-SessionSchema.statics.findActiveSession = function (token: string) {
+// Static method to find active session
+sessionSchema.statics.findActiveSession = function (sessionId: string) {
   return this.findOne({
-    token,
+    sessionId,
     isActive: true,
     expiresAt: { $gt: new Date() },
-  }).populate("userId", "name email isActive");
+  }).populate("userId", "name email role");
 };
 
-SessionSchema.statics.deactivateUserSessions = function (userId: string) {
-  return this.updateMany(
-    { userId, isActive: true },
-    { isActive: false, updatedAt: new Date() }
-  );
+// Static method to deactivate all user sessions
+sessionSchema.statics.deactivateUserSessions = function (
+  userId: Types.ObjectId
+) {
+  return this.updateMany({ userId, isActive: true }, { isActive: false });
 };
 
-export const Session = model<ISession>("Session", SessionSchema);
+// Instance method to check if session is valid
+sessionSchema.methods.isValid = function (): boolean {
+  return this.isActive && this.expiresAt > new Date();
+};
+
+// Instance method to extend session
+sessionSchema.methods.extend = function (
+  additionalTime: number = 24 * 60 * 60 * 1000
+) {
+  this.expiresAt = new Date(Date.now() + additionalTime);
+  return this.save();
+};
+
+export const Session = model<ISession>("Session", sessionSchema);
